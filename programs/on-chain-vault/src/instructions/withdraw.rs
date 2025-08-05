@@ -1,43 +1,57 @@
 //-------------------------------------------------------------------------
 ///
-/// TASK: Implement the toggle lock functionality for the on-chain vault
+/// TASK: Implement the withdraw functionality for the on-chain vault
 /// 
 /// Requirements:
-/// - Toggle the locked state of the vault (locked becomes unlocked, unlocked becomes locked)
-/// - Only the vault authority should be able to toggle the lock
-/// - Emit a toggle lock event after successful state change
+/// - Verify that the vault is not locked
+/// - Verify that the vault has enough balance to withdraw
+/// - Transfer lamports from vault to vault authority
+/// - Emit a withdraw event after successful transfer
 /// 
 ///-------------------------------------------------------------------------
 
 use anchor_lang::prelude::*;
 use crate::state::Vault;
-use crate::events::ToggleLockEvent;
+use crate::errors::VaultError;
+use crate::events::WithdrawEvent;
 
 #[derive(Accounts)]
-pub struct ToggleLock<'info> {
+pub struct Withdraw<'info> {
     #[account(mut)]
     pub vault_authority: Signer<'info>,
     #[account(
         mut,
         seeds = [b"vault", vault_authority.key().as_ref()],
         bump,
+        constraint = !vault.locked @ VaultError::VaultLocked,
         constraint = vault.vault_authority == vault_authority.key()
     )]
     pub vault: Account<'info, Vault>,
 }
 
-pub fn _toggle_lock(ctx: Context<ToggleLock>) -> Result<()> {
+pub fn _withdraw(ctx: Context<Withdraw>, amount: u64) -> Result<()> {
     let vault = &mut ctx.accounts.vault;
     let vault_authority = &ctx.accounts.vault_authority;
     
-    // Toggle the locked status
-    vault.locked = !vault.locked;
+    // Check vault balance (must account for rent exemption)
+    let vault_balance = vault.to_account_info().lamports();
+    let minimum_balance = Rent::get()?.minimum_balance(8 + Vault::INIT_SPACE);
     
-    // Emit toggle lock event
-    emit!(ToggleLockEvent {
-        vault: vault.key(),
+    require!(
+        vault_balance >= amount.checked_add(minimum_balance).ok_or(VaultError::Overflow)?,
+        VaultError::InsufficientBalance
+    );
+    
+    // Transfer lamports from vault to vault authority
+    // We need to manually transfer since we're going from PDA to regular account
+    **vault.to_account_info().try_borrow_mut_lamports()? -= amount;
+    **vault_authority.to_account_info().try_borrow_mut_lamports()? += amount;
+    
+    // Emit withdraw event
+    emit!(WithdrawEvent {
+        amount,
         vault_authority: vault_authority.key(),
-        locked: vault.locked,
+        vault: vault.key(),
     });
     
     Ok(())
